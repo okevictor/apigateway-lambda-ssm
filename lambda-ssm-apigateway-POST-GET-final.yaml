@@ -1,0 +1,160 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: simple apigateway, ssm parameter store and lambda function
+
+Parameters:
+  ApiName:
+    Type: String
+    Default: simple-api-ssm-lambda
+  CreateRetrieveSSMLambdaName:
+    Type: String
+    Default: create-retrieve-ssm
+
+Resources:
+
+  CreateRetrieveSSMLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref CreateRetrieveSSMLambdaName
+      Handler: index.lambda_handler
+      Runtime: python3.8
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          
+          def lambda_handler(event, context):
+              httpMethod = event['httpMethod']
+              aws_client = boto3.client('ssm')
+              if httpMethod == "GET":
+                  mytestname = event['queryStringParameters']['Name']
+
+                  ssm_info = aws_client.get_parameter(
+                      Name=mytestname,
+                      WithDecryption=True
+                  )
+
+                  mytestResponse = {}
+                  mytestResponse['Value'] = ssm_info['Parameter']['Value']
+
+                  responseObject = {}
+                  responseObject['statusCode'] = 200
+                  responseObject['headers'] = {}
+                  responseObject['headers']['Content-Type'] = 'application/json'
+                  responseObject['body'] = json.dumps(mytestResponse)
+
+                  return responseObject
+
+              elif httpMethod == "POST":
+                  getbodyname = json.loads(event['body'])['Name']
+                  getbodyvalue = json.loads(event['body'])['Value']
+
+                  response = aws_client.put_parameter(
+                      Name=getbodyname,
+                      Value=getbodyvalue,
+                      Type="String",
+                      Overwrite=True
+                  )
+                  return {
+                      'statusCode': 201
+                  }
+              else:
+                  return "command not found"
+
+      Role: !GetAtt LambdaRole.Arn
+      Timeout: 30
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Policies:
+        - PolicyName: LambdaPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource:
+                  - 'arn:aws:logs:*:*:*'
+                Effect: Allow
+              - Action:
+                  - 'ssm:PutParameter'
+                  - 'ssm:DeleteParameter'
+                  - 'ssm:GetParameterHistory'
+                  - 'ssm:GetParametersByPath'
+                  - 'ssm:GetParameters'
+                  - 'ssm:GetParameter'
+                  - 'ssm:DescribeParameters'
+                  - 'ssm:DeleteParameters'
+                Resource:
+                  - 'arn:aws:ssm:*:*:parameter/*'
+                Effect: Allow
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+
+  RestAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Description: Create and Retrieve API
+      Name: !Ref ApiName
+
+  RestAPIDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - RetrieveSSMMethod
+      - CreateSSMMethod
+    Properties:
+      RestApiId: !Ref RestAPI
+      StageName: Lambda-ssm-api
+
+  SSMResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt RestAPI.RootResourceId
+      PathPart: ssm-Lambda
+      RestApiId: !Ref RestAPI
+
+  RetrieveSSMMethod:
+    Type: AWS::ApiGateway::Method
+    DependsOn:
+      - CreateRetrieveSSMLambda
+      - SSMResource
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: GET
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:create-retrieve-ssm/invocations
+      ResourceId: !Ref SSMResource
+      RestApiId: !Ref RestAPI
+
+  CreateSSMMethod:
+    Type: AWS::ApiGateway::Method
+    DependsOn:
+      - CreateRetrieveSSMLambda
+      - SSMResource
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: POST
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:create-retrieve-ssm/invocations
+      ResourceId: !Ref SSMResource
+      RestApiId: !Ref RestAPI
+
+  ApiGatewayInvokePermissionForCreateRetrieveSSM:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt CreateRetrieveSSMLambda.Arn
+      Principal: apigateway.amazonaws.com

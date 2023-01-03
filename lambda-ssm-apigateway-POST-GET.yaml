@@ -1,0 +1,187 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Simple Books API Gateway and Lambda functions
+
+Parameters:
+  ApiName:
+    Type: String
+    Default: simple-books-api
+  RetrieveBooksLambdaName:
+    Type: String
+    Default: retrieve-books
+  CreateBooksLambdaName:
+    Type: String
+    Default: create-books
+
+Resources:
+
+  RetrieveBooksLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref RetrieveBooksLambdaName
+      Handler: index.lambda_handler
+      Runtime: python3.8
+      MemorySize: 128
+      Code:
+        ZipFile: |
+            import json
+            import boto3
+
+            print('Loading function')
+
+            def lambda_handler(event, context):
+                #1. parse out query string params
+                mytestname = event['queryStringParameters']['Name']
+            
+                aws_client = boto3.client('ssm')
+                ssm_info = aws_client.get_parameter(
+                    Name=mytestname,
+                    WithDecryption=True
+                    )  
+                    
+                #2. Construct the body of the response object
+                mytestResponse = {}
+                mytestResponse['Value'] = ssm_info['Parameter']['Value']
+
+                #3. Construct http response object
+                responseObject = {}
+                responseObject['statusCode'] = 200
+                responseObject['headers'] = {}
+                responseObject['headers']['Content-Type'] = 'application/json'
+                responseObject['body'] = json.dumps(mytestResponse)
+
+                #4. return the response
+                return responseObject
+
+      Role: !GetAtt LambdaRole.Arn
+      Timeout: 30
+
+  CreateBooksLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref CreateBooksLambdaName
+      Handler: index.lambda_handler
+      Runtime: python3.8
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          
+          def lambda_handler(event, context):
+            getbodyname = json.loads(event['body'])['Name']
+            getbodyvalue = json.loads(event['body'])['Value']
+            
+            aws_client = boto3.client('ssm')
+            response = aws_client.put_parameter(
+                Name=getbodyname,
+                Value=getbodyvalue,
+                Type="String",
+                Overwrite=True
+            )
+            return {
+                'statusCode': 201
+            }
+
+      Role: !GetAtt LambdaRole.Arn
+      Timeout: 30
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Policies:
+        - PolicyName: LambdaPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource:
+                  - 'arn:aws:logs:*:*:*'
+                Effect: Allow
+              - Action:
+                  - 'ssm:PutParameter'
+                  - 'ssm:DeleteParameter'
+                  - 'ssm:GetParameterHistory'
+                  - 'ssm:GetParametersByPath'
+                  - 'ssm:GetParameters'
+                  - 'ssm:GetParameter'
+                  - 'ssm:DescribeParameters'
+                  - 'ssm:DeleteParameters'
+                Resource:
+                  - 'arn:aws:ssm:*:*:parameter/*'
+                Effect: Allow
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+
+  RestAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Description: Simple Books API
+      Name: !Ref ApiName
+
+  RestAPIDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: RetrieveBooksMethod
+    Properties:
+      RestApiId: !Ref RestAPI
+      StageName: v1
+
+  BooksResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt RestAPI.RootResourceId
+      PathPart: books
+      RestApiId: !Ref RestAPI
+
+  RetrieveBooksMethod:
+    Type: AWS::ApiGateway::Method
+    DependsOn:
+      - RetrieveBooksLambda
+      - BooksResource
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: GET
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:retrieve-books/invocations
+      ResourceId: !Ref BooksResource
+      RestApiId: !Ref RestAPI
+
+  CreateBooksMethod:
+    Type: AWS::ApiGateway::Method
+    DependsOn:
+      - CreateBooksLambda
+      - BooksResource
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: POST
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:create-books/invocations
+      ResourceId: !Ref BooksResource
+      RestApiId: !Ref RestAPI
+
+  ApiGatewayInvokePermissionForRetrieveBooks:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt RetrieveBooksLambda.Arn
+      Principal: apigateway.amazonaws.com
+
+  ApiGatewayInvokePermissionForCreateBooks:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt CreateBooksLambda.Arn
+      Principal: apigateway.amazonaws.com
